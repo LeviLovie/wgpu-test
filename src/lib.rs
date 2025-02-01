@@ -7,6 +7,8 @@ use winit::{
 };
 
 pub mod state;
+pub mod texture;
+
 use state::State;
 
 pub async fn run() {
