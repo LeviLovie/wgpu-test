@@ -1,4 +1,5 @@
 use crate::texture;
+use cgmath::prelude::*;
 use tracing::{debug, debug_span, error, trace};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -6,6 +7,13 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
+
+const NUM_INSTANCES_PER_ROW: u32 = 10;
+const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+    0.0,
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+);
 
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
@@ -113,6 +121,8 @@ struct CameraController {
     is_backward_pressed: bool,
     is_left_pressed: bool,
     is_right_pressed: bool,
+    is_q_pressed: bool,
+    is_e_pressed: bool,
 }
 
 impl CameraController {
@@ -123,6 +133,8 @@ impl CameraController {
             is_backward_pressed: false,
             is_left_pressed: false,
             is_right_pressed: false,
+            is_q_pressed: false,
+            is_e_pressed: false,
         }
     }
 
@@ -155,6 +167,14 @@ impl CameraController {
                         self.is_right_pressed = is_pressed;
                         true
                     }
+                    KeyCode::KeyQ => {
+                        self.is_q_pressed = is_pressed;
+                        true
+                    }
+                    KeyCode::KeyE => {
+                        self.is_e_pressed = is_pressed;
+                        true
+                    }
                     _ => false,
                 }
             }
@@ -170,27 +190,84 @@ impl CameraController {
 
         // Prevents glitching when the camera gets too close to the
         // center of the scene.
-        if self.is_forward_pressed && forward_mag > self.speed {
+        if self.is_q_pressed && forward_mag > self.speed {
             camera.eye += forward_norm * self.speed;
         }
-        if self.is_backward_pressed {
+        if self.is_e_pressed {
             camera.eye -= forward_norm * self.speed;
         }
 
         let right = forward_norm.cross(camera.up);
 
-        // Redo radius calc in case the forward/backward is pressed.
         let forward = camera.target - camera.eye;
         let forward_mag = forward.magnitude();
 
         if self.is_right_pressed {
-            // Rescale the distance between the target and the eye so
-            // that it doesn't change. The eye, therefore, still
-            // lies on the circle made by the target and eye.
             camera.eye = camera.target - (forward + right * self.speed).normalize() * forward_mag;
         }
         if self.is_left_pressed {
             camera.eye = camera.target - (forward - right * self.speed).normalize() * forward_mag;
+        }
+        if self.is_backward_pressed {
+            camera.eye =
+                camera.target - (forward + camera.up * self.speed).normalize() * forward_mag;
+        }
+        if self.is_forward_pressed {
+            camera.eye =
+                camera.target - (forward - camera.up * self.speed).normalize() * forward_mag;
+        }
+    }
+}
+
+struct Instance {
+    position: cgmath::Vector3<f32>,
+    rotation: cgmath::Quaternion<f32>,
+}
+
+impl Instance {
+    fn to_raw(&self) -> InstanceRaw {
+        InstanceRaw {
+            model: (cgmath::Matrix4::from_translation(self.position)
+                * cgmath::Matrix4::from(self.rotation))
+            .into(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    model: [[f32; 4]; 4],
+}
+
+impl InstanceRaw {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
         }
     }
 }
@@ -215,6 +292,10 @@ pub struct State<'a> {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     last_update_inst: std::time::Instant,
+    instances: Vec<Instance>,
+    instance_buffer: wgpu::Buffer,
+    cap_frame_rate: bool,
+    depth_texture: texture::Texture,
 }
 
 impl<'a> State<'a> {
@@ -349,6 +430,36 @@ impl<'a> State<'a> {
         });
         debug!("Diffuse bind group created");
 
+        let instances = (0..NUM_INSTANCES_PER_ROW)
+            .flat_map(|z| {
+                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                    let position = cgmath::Vector3 {
+                        x: x as f32,
+                        y: 0.0,
+                        z: z as f32,
+                    } - INSTANCE_DISPLACEMENT;
+
+                    let rotation = if position.is_zero() {
+                        cgmath::Quaternion::from_axis_angle(
+                            cgmath::Vector3::unit_z(),
+                            cgmath::Deg(0.0),
+                        )
+                    } else {
+                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
+                    };
+
+                    Instance { position, rotation }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&instance_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         let camera = Camera {
             eye: (0.0, 1.0, 2.0).into(),
             target: (0.0, 0.0, 0.0).into(),
@@ -389,6 +500,9 @@ impl<'a> State<'a> {
         });
         trace!("Camera created");
 
+        let depth_texture =
+            texture::Texture::create_depth_texture(&device, &config, "depth_texture");
+
         trace!("Creating render pipeline");
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         debug!("Shader created");
@@ -404,7 +518,7 @@ impl<'a> State<'a> {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex::desc(), InstanceRaw::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -427,7 +541,13 @@ impl<'a> State<'a> {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: texture::Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -452,7 +572,7 @@ impl<'a> State<'a> {
         let num_indices = INDICES.len() as u32;
         trace!("Index buffer created");
 
-        let camera_controller = CameraController::new(0.2);
+        let camera_controller = CameraController::new(0.1);
 
         debug!("State created successfully");
         Self {
@@ -480,6 +600,10 @@ impl<'a> State<'a> {
             camera_buffer,
             camera_bind_group,
             last_update_inst: std::time::Instant::now(),
+            instances,
+            instance_buffer,
+            cap_frame_rate: true,
+            depth_texture,
         }
     }
 
@@ -493,11 +617,41 @@ impl<'a> State<'a> {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            self.depth_texture =
+                texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
         }
     }
 
     pub fn input(&mut self, event: &WindowEvent) -> bool {
-        self.camera_controller.process_events(event)
+        if self.camera_controller.process_events(event) {
+            return true;
+        }
+
+        match event {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state,
+                        physical_key: PhysicalKey::Code(keycode),
+                        ..
+                    },
+                ..
+            } => {
+                let is_pressed = *state == ElementState::Pressed;
+                match keycode {
+                    KeyCode::Space => {
+                        if is_pressed {
+                            self.cap_frame_rate = !self.cap_frame_rate;
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+
+        return false;
     }
 
     pub fn update(&mut self) {
@@ -512,11 +666,16 @@ impl<'a> State<'a> {
         // TODO: Unfix the frame value and maybe move that to somewhere else
         let now = std::time::Instant::now();
         let delta_time = now - self.last_update_inst;
+        let fps = 1.0 / delta_time.as_secs_f32();
         self.last_update_inst = now;
-        let sleep_duration = std::time::Duration::from_secs_f32(1.0 / 60.0)
-            .checked_sub(delta_time)
-            .unwrap_or_default();
-        std::thread::sleep(sleep_duration);
+        self.window
+            .set_title(&format!("With the Wind FPS: {:.2}", fps));
+        if self.cap_frame_rate {
+            let sleep_duration = std::time::Duration::from_secs_f32(1.0 / 60.0)
+                .checked_sub(delta_time)
+                .unwrap_or_default();
+            std::thread::sleep(sleep_duration);
+        }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -543,7 +702,14 @@ impl<'a> State<'a> {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
@@ -552,8 +718,9 @@ impl<'a> State<'a> {
             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
