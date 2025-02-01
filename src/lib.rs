@@ -1,11 +1,12 @@
-use tracing::{debug, error, info, info_span, trace, warn};
-use winit::{
+use egui_winit::winit::{
     event::*,
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };
+use tracing::{debug, error, info, info_span, trace, warn};
 
+pub mod gui;
 pub mod state;
 pub mod texture;
 
@@ -54,6 +55,7 @@ pub async fn run() {
         info!("Initialization complete");
     }
     let mut surface_configured = false;
+    let mut last_redraw = std::time::Instant::now();
 
     info!("Running event loop");
     let _ = event_loop.run(move |event, control_flow| match event {
@@ -85,28 +87,47 @@ pub async fn run() {
                             return;
                         }
 
+                        let now = std::time::Instant::now();
+
                         state.update();
                         match state.render() {
                             Ok(_) => {}
 
-                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                                state.resize(state.size)
-                            }
+                            Err(
+                                egui_wgpu::wgpu::SurfaceError::Lost
+                                | egui_wgpu::wgpu::SurfaceError::Outdated,
+                            ) => state.resize(state.size),
 
-                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                            Err(egui_wgpu::wgpu::SurfaceError::OutOfMemory) => {
                                 error!("OutOfMemory");
                                 control_flow.exit();
                             }
 
-                            Err(wgpu::SurfaceError::Timeout) => {
+                            Err(egui_wgpu::wgpu::SurfaceError::Timeout) => {
                                 warn!("Surface timeout")
                             }
                         }
+
+                        let elapsed = std::time::Instant::now() - now;
+                        state.status.delta = elapsed.as_micros();
+                        if elapsed < std::time::Duration::from_secs_f64(1.0 / 60.0)
+                            && state.status.cap_frame_rate
+                        {
+                            std::thread::sleep(std::time::Duration::from_secs_f64(
+                                1.0 / 60.0 - elapsed.as_secs_f64(),
+                            ));
+                        }
+                        let full_elapsed = std::time::Instant::now() - last_redraw;
+                        state.status.fps = (1_000.0 / full_elapsed.as_millis() as f64) as f32;
+                        state.status.fps_avg =
+                            0.95 * state.status.fps_avg + 0.05 * state.status.fps;
+                        last_redraw = now;
                     }
 
                     _ => {}
                 }
             }
+            state.egui.handle_input(&mut state.window, event);
         }
         _ => {}
     });
