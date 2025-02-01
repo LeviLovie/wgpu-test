@@ -1,5 +1,9 @@
 use tracing::{debug, debug_span, error, trace};
-use winit::{event::*, window::Window};
+use winit::{
+    event::*,
+    keyboard::{KeyCode, PhysicalKey},
+    window::Window,
+};
 
 pub struct State<'a> {
     pub size: winit::dpi::PhysicalSize<u32>,
@@ -9,6 +13,9 @@ pub struct State<'a> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     window: &'a Window,
+    render_pipeline_1: wgpu::RenderPipeline,
+    render_pipeline_2: wgpu::RenderPipeline,
+    use_pipeline_1: bool,
 }
 
 impl<'a> State<'a> {
@@ -97,16 +104,106 @@ impl<'a> State<'a> {
         };
         trace!("Surface configuration created: {:?}", config);
 
+        trace!("Creating render pipeline");
+        let shader_1 = device.create_shader_module(wgpu::include_wgsl!("first.wgsl"));
+        let shader_2 = device.create_shader_module(wgpu::include_wgsl!("second.wgsl"));
+        debug!("Shader created");
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+        let render_pipeline_1 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_1,
+                entry_point: "vs_main",
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_1,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None, // 1.
+            multisample: wgpu::MultisampleState {
+                count: 1,                         // 2.
+                mask: !0,                         // 3.
+                alpha_to_coverage_enabled: false, // 4.
+            },
+            multiview: None, // 5.
+            cache: None,     // 6.
+        });
+        let render_pipeline_2 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_2,
+                entry_point: "vs_main",
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_2,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None, // 1.
+            multisample: wgpu::MultisampleState {
+                count: 1,                         // 2.
+                mask: !0,                         // 3.
+                alpha_to_coverage_enabled: false, // 4.
+            },
+            multiview: None, // 5.
+            cache: None,     // 6.
+        });
+        debug!("Render pipeline created");
+
         debug!("State created successfully");
         Self {
             size,
             clear_color: wgpu::Color::BLACK,
-
             surface,
             device,
             queue,
             config,
             window,
+            render_pipeline_1,
+            render_pipeline_2,
+            use_pipeline_1: true,
         }
     }
 
@@ -134,6 +231,20 @@ impl<'a> State<'a> {
                 };
                 true
             }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state,
+                        physical_key: PhysicalKey::Code(KeyCode::Space),
+                        ..
+                    },
+                ..
+            } => {
+                if *state == ElementState::Pressed {
+                    self.use_pipeline_1 = !self.use_pipeline_1;
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -154,7 +265,7 @@ impl<'a> State<'a> {
             });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -168,6 +279,13 @@ impl<'a> State<'a> {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+
+            if self.use_pipeline_1 {
+                render_pass.set_pipeline(&self.render_pipeline_1);
+            } else {
+                render_pass.set_pipeline(&self.render_pipeline_2);
+            }
+            render_pass.draw(0..3, 0..1);
         }
 
         // submit will accept anything that implements IntoIter
