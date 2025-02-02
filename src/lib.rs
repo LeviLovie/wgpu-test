@@ -6,6 +6,7 @@ use egui_winit::winit::{
 };
 use tracing::{debug, error, info, info_span, trace, warn};
 
+pub mod camera;
 pub mod gui;
 pub mod state;
 pub mod texture;
@@ -55,14 +56,20 @@ pub async fn run() {
         info!("Initialization complete");
     }
     let mut surface_configured = false;
-    let mut last_redraw = std::time::Instant::now();
+    let mut last_render_time = std::time::Instant::now();
 
     info!("Running event loop");
     let _ = event_loop.run(move |event, control_flow| match event {
+        Event::DeviceEvent {
+            event: DeviceEvent::MouseMotion{ delta, },
+            .. // We're not using device_id currently
+        } => if state.mouse_pressed {
+            state.camera_controller.process_mouse(delta.0, delta.1)
+        }
         Event::WindowEvent {
             ref event,
             window_id,
-        } if window_id == state.window().id() => {
+        } if window_id == state.window().id() && !state.input(event) => {
             if !state.input(event) {
                 match event {
                     WindowEvent::CloseRequested
@@ -88,8 +95,13 @@ pub async fn run() {
                         }
 
                         let now = std::time::Instant::now();
-
-                        state.update();
+                        let dt = now - last_render_time;
+                        last_render_time = now;
+                        state.status.delta = dt.as_micros();
+                        state.status.fps = 1_000_000.0 / dt.as_micros() as f32;
+                        state.status.fps_avg =
+                            0.95 * state.status.fps_avg + 0.05 * state.status.fps;
+                        state.update(dt);
                         match state.render() {
                             Ok(_) => {}
 
@@ -107,21 +119,6 @@ pub async fn run() {
                                 warn!("Surface timeout")
                             }
                         }
-
-                        let elapsed = std::time::Instant::now() - now;
-                        state.status.delta = elapsed.as_micros();
-                        if elapsed < std::time::Duration::from_secs_f64(1.0 / 60.0)
-                            && state.status.cap_frame_rate
-                        {
-                            std::thread::sleep(std::time::Duration::from_secs_f64(
-                                1.0 / 60.0 - elapsed.as_secs_f64(),
-                            ));
-                        }
-                        let full_elapsed = std::time::Instant::now() - last_redraw;
-                        state.status.fps = (1_000.0 / full_elapsed.as_millis() as f64) as f32;
-                        state.status.fps_avg =
-                            0.95 * state.status.fps_avg + 0.05 * state.status.fps;
-                        last_redraw = now;
                     }
 
                     _ => {}
