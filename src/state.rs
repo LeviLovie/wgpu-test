@@ -304,16 +304,6 @@ impl<'a> State<'a> {
                         ),
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
                 ],
                 label: Some("texture_bind_group_layout"),
             });
@@ -327,10 +317,6 @@ impl<'a> State<'a> {
                 egui_wgpu::wgpu::BindGroupEntry {
                     binding: 1,
                     resource: egui_wgpu::wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&depth_texture.view),
                 },
             ],
             label: Some("diffuse_bind_group"),
