@@ -1,26 +1,14 @@
-use crate::texture;
+use crate::{camera, gui, texture};
 use cgmath::prelude::*;
+use egui_wgpu::wgpu::util::DeviceExt;
+use egui_winit::winit::{event::*, keyboard::PhysicalKey, window::Window};
 use tracing::{debug, debug_span, error, trace};
-use wgpu::util::DeviceExt;
-use winit::{
-    event::*,
-    keyboard::{KeyCode, PhysicalKey},
-    window::Window,
-};
 
-const NUM_INSTANCES_PER_ROW: u32 = 10;
+const NUM_INSTANCES_PER_ROW: u32 = 15;
 const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
     NUM_INSTANCES_PER_ROW as f32 * 0.5,
-    0.0,
     NUM_INSTANCES_PER_ROW as f32 * 0.5,
-);
-
-#[rustfmt::skip]
-pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 0.5, 0.5,
-    0.0, 0.0, 0.0, 1.0,
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
 );
 
 #[repr(C)]
@@ -31,21 +19,21 @@ struct Vertex {
 }
 
 impl Vertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
+    fn desc() -> egui_wgpu::wgpu::VertexBufferLayout<'static> {
         use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
+        egui_wgpu::wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<Vertex>() as egui_wgpu::wgpu::BufferAddress,
+            step_mode: egui_wgpu::wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute {
+                egui_wgpu::wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: egui_wgpu::wgpu::VertexFormat::Float32x3,
                 },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                egui_wgpu::wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 3]>() as egui_wgpu::wgpu::BufferAddress,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
+                    format: egui_wgpu::wgpu::VertexFormat::Float32x2,
                 },
             ],
         }
@@ -86,136 +74,14 @@ struct CameraUniform {
 impl CameraUniform {
     fn new() -> Self {
         use cgmath::SquareMatrix;
+
         Self {
             view_proj: cgmath::Matrix4::identity().into(),
         }
     }
 
-    fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_proj = camera.build_view_projection_matrix().into();
-    }
-}
-
-struct Camera {
-    eye: cgmath::Point3<f32>,
-    target: cgmath::Point3<f32>,
-    up: cgmath::Vector3<f32>,
-    aspect: f32,
-    fovy: f32,
-    znear: f32,
-    zfar: f32,
-}
-
-impl Camera {
-    fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-
-        return OPENGL_TO_WGPU_MATRIX * proj * view;
-    }
-}
-
-struct CameraController {
-    speed: f32,
-    is_forward_pressed: bool,
-    is_backward_pressed: bool,
-    is_left_pressed: bool,
-    is_right_pressed: bool,
-    is_q_pressed: bool,
-    is_e_pressed: bool,
-}
-
-impl CameraController {
-    fn new(speed: f32) -> Self {
-        Self {
-            speed,
-            is_forward_pressed: false,
-            is_backward_pressed: false,
-            is_left_pressed: false,
-            is_right_pressed: false,
-            is_q_pressed: false,
-            is_e_pressed: false,
-        }
-    }
-
-    fn process_events(&mut self, event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state,
-                        physical_key: PhysicalKey::Code(keycode),
-                        ..
-                    },
-                ..
-            } => {
-                let is_pressed = *state == ElementState::Pressed;
-                match keycode {
-                    KeyCode::KeyW | KeyCode::ArrowUp => {
-                        self.is_forward_pressed = is_pressed;
-                        true
-                    }
-                    KeyCode::KeyA | KeyCode::ArrowLeft => {
-                        self.is_left_pressed = is_pressed;
-                        true
-                    }
-                    KeyCode::KeyS | KeyCode::ArrowDown => {
-                        self.is_backward_pressed = is_pressed;
-                        true
-                    }
-                    KeyCode::KeyD | KeyCode::ArrowRight => {
-                        self.is_right_pressed = is_pressed;
-                        true
-                    }
-                    KeyCode::KeyQ => {
-                        self.is_q_pressed = is_pressed;
-                        true
-                    }
-                    KeyCode::KeyE => {
-                        self.is_e_pressed = is_pressed;
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
-    }
-
-    fn update_camera(&self, camera: &mut Camera) {
-        use cgmath::InnerSpace;
-        let forward = camera.target - camera.eye;
-        let forward_norm = forward.normalize();
-        let forward_mag = forward.magnitude();
-
-        // Prevents glitching when the camera gets too close to the
-        // center of the scene.
-        if self.is_q_pressed && forward_mag > self.speed {
-            camera.eye += forward_norm * self.speed;
-        }
-        if self.is_e_pressed {
-            camera.eye -= forward_norm * self.speed;
-        }
-
-        let right = forward_norm.cross(camera.up);
-
-        let forward = camera.target - camera.eye;
-        let forward_mag = forward.magnitude();
-
-        if self.is_right_pressed {
-            camera.eye = camera.target - (forward + right * self.speed).normalize() * forward_mag;
-        }
-        if self.is_left_pressed {
-            camera.eye = camera.target - (forward - right * self.speed).normalize() * forward_mag;
-        }
-        if self.is_backward_pressed {
-            camera.eye =
-                camera.target - (forward + camera.up * self.speed).normalize() * forward_mag;
-        }
-        if self.is_forward_pressed {
-            camera.eye =
-                camera.target - (forward - camera.up * self.speed).normalize() * forward_mag;
-        }
+    fn update_view_proj(&mut self, camera: &camera::Camera, projection: &camera::Projection) {
+        self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
     }
 }
 
@@ -241,60 +107,80 @@ struct InstanceRaw {
 }
 
 impl InstanceRaw {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
+    fn desc() -> egui_wgpu::wgpu::VertexBufferLayout<'static> {
         use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
+        egui_wgpu::wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<InstanceRaw>() as egui_wgpu::wgpu::BufferAddress,
+            step_mode: egui_wgpu::wgpu::VertexStepMode::Instance,
             attributes: &[
-                wgpu::VertexAttribute {
+                egui_wgpu::wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
+                    format: egui_wgpu::wgpu::VertexFormat::Float32x4,
                 },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                egui_wgpu::wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as egui_wgpu::wgpu::BufferAddress,
                     shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
+                    format: egui_wgpu::wgpu::VertexFormat::Float32x4,
                 },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                egui_wgpu::wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as egui_wgpu::wgpu::BufferAddress,
                     shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
+                    format: egui_wgpu::wgpu::VertexFormat::Float32x4,
                 },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                egui_wgpu::wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as egui_wgpu::wgpu::BufferAddress,
                     shader_location: 8,
-                    format: wgpu::VertexFormat::Float32x4,
+                    format: egui_wgpu::wgpu::VertexFormat::Float32x4,
                 },
             ],
         }
     }
 }
 
+pub struct Status {
+    pub fps: f32,
+    pub fps_avg: f32,
+    pub delta: u128,
+    pub cap_frame_rate: bool,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            fps: 0.0,
+            fps_avg: 0.0,
+            delta: 0,
+            cap_frame_rate: true,
+        }
+    }
+}
+
 pub struct State<'a> {
-    pub size: winit::dpi::PhysicalSize<u32>,
-    clear_color: wgpu::Color,
-    surface: wgpu::Surface<'a>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    window: &'a Window,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
+    pub size: egui_winit::winit::dpi::PhysicalSize<u32>,
+    pub egui: gui::EguiRenderer,
+    pub window: &'a Window,
+    pub status: Status,
+    pub mouse_pressed: bool,
+    clear_color: egui_wgpu::wgpu::Color,
+    surface: egui_wgpu::wgpu::Surface<'a>,
+    device: egui_wgpu::wgpu::Device,
+    queue: egui_wgpu::wgpu::Queue,
+    config: egui_wgpu::wgpu::SurfaceConfiguration,
+    render_pipeline: egui_wgpu::wgpu::RenderPipeline,
+    vertex_buffer: egui_wgpu::wgpu::Buffer,
+    index_buffer: egui_wgpu::wgpu::Buffer,
     num_indices: u32,
-    diffuse_bind_group: wgpu::BindGroup,
+    diffuse_bind_group: egui_wgpu::wgpu::BindGroup,
     _diffuse_texture: texture::Texture,
-    camera: Camera,
-    camera_controller: CameraController,
+    camera: camera::Camera,
+    projection: camera::Projection,
+    pub camera_controller: camera::CameraController,
     camera_uniform: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    last_update_inst: std::time::Instant,
+    camera_buffer: egui_wgpu::wgpu::Buffer,
+    camera_bind_group: egui_wgpu::wgpu::BindGroup,
     instances: Vec<Instance>,
-    instance_buffer: wgpu::Buffer,
-    cap_frame_rate: bool,
+    instance_buffer: egui_wgpu::wgpu::Buffer,
     depth_texture: texture::Texture,
 }
 
@@ -313,8 +199,8 @@ impl<'a> State<'a> {
 
         // The instance is a handle to our GPU
         // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+        let instance = egui_wgpu::wgpu::Instance::new(egui_wgpu::wgpu::InstanceDescriptor {
+            backends: egui_wgpu::wgpu::Backends::PRIMARY,
             ..Default::default()
         });
         trace!("Instance created");
@@ -329,8 +215,8 @@ impl<'a> State<'a> {
         trace!("Surface created");
 
         let adapter = match instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+            .request_adapter(&egui_wgpu::wgpu::RequestAdapterOptions {
+                power_preference: egui_wgpu::wgpu::PowerPreference::default(),
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
@@ -346,11 +232,11 @@ impl<'a> State<'a> {
 
         let (device, queue) = match adapter
             .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                &egui_wgpu::wgpu::DeviceDescriptor {
+                    required_features: egui_wgpu::wgpu::Features::empty(),
+                    required_limits: egui_wgpu::wgpu::Limits::default(),
                     label: None,
-                    memory_hints: Default::default(),
+                    // memory_hints: Default::default(),
                 },
                 None,
             )
@@ -372,8 +258,8 @@ impl<'a> State<'a> {
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        let config = egui_wgpu::wgpu::SurfaceConfiguration {
+            usage: egui_wgpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width,
             height: size.height,
@@ -394,24 +280,28 @@ impl<'a> State<'a> {
             texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
         let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            device.create_bind_group_layout(&egui_wgpu::wgpu::BindGroupLayoutDescriptor {
                 entries: &[
-                    wgpu::BindGroupLayoutEntry {
+                    egui_wgpu::wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
+                        visibility: egui_wgpu::wgpu::ShaderStages::FRAGMENT,
+                        ty: egui_wgpu::wgpu::BindingType::Texture {
                             multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: egui_wgpu::wgpu::TextureViewDimension::D2,
+                            sample_type: egui_wgpu::wgpu::TextureSampleType::Float {
+                                filterable: true,
+                            },
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
+                    egui_wgpu::wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: egui_wgpu::wgpu::ShaderStages::FRAGMENT,
                         // This should match the filterable field of the
                         // corresponding Texture entry above.
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        ty: egui_wgpu::wgpu::BindingType::Sampler(
+                            egui_wgpu::wgpu::SamplerBindingType::Filtering,
+                        ),
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
@@ -427,16 +317,16 @@ impl<'a> State<'a> {
                 ],
                 label: Some("texture_bind_group_layout"),
             });
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let diffuse_bind_group = device.create_bind_group(&egui_wgpu::wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry {
+                egui_wgpu::wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                    resource: egui_wgpu::wgpu::BindingResource::TextureView(&diffuse_texture.view),
                 },
-                wgpu::BindGroupEntry {
+                egui_wgpu::wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                    resource: egui_wgpu::wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -449,57 +339,66 @@ impl<'a> State<'a> {
 
         let instances = (0..NUM_INSTANCES_PER_ROW)
             .flat_map(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let position = cgmath::Vector3 {
-                        x: x as f32,
-                        y: 0.0,
-                        z: z as f32,
-                    } - INSTANCE_DISPLACEMENT;
+                (0..NUM_INSTANCES_PER_ROW).flat_map(move |x| {
+                    (0..NUM_INSTANCES_PER_ROW)
+                        .map(move |y| {
+                            let position = cgmath::Vector3 {
+                                x: x as f32,
+                                y: y as f32,
+                                z: z as f32,
+                            } - INSTANCE_DISPLACEMENT;
 
-                    let rotation = if position.is_zero() {
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
-                    };
+                            let rotation = if position.is_zero() {
+                                cgmath::Quaternion::from_axis_angle(
+                                    cgmath::Vector3::unit_z(),
+                                    cgmath::Deg(0.0),
+                                )
+                            } else {
+                                cgmath::Quaternion::from_axis_angle(
+                                    position.normalize(),
+                                    cgmath::Deg(30.0),
+                                )
+                            };
 
-                    Instance { position, rotation }
+                            Instance { position, rotation }
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect::<Vec<_>>();
 
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Instance Buffer"),
-            contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let instance_data = instances
+            .iter()
+            .map(Instance::to_raw)
+            .collect::<Vec<InstanceRaw>>();
+        let instance_buffer =
+            device.create_buffer_init(&egui_wgpu::wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: bytemuck::cast_slice(&instance_data),
+                usage: egui_wgpu::wgpu::BufferUsages::VERTEX,
+            });
 
-        let camera = Camera {
-            eye: (0.0, 1.0, 2.0).into(),
-            target: (0.0, 0.0, 0.0).into(),
-            up: cgmath::Vector3::unit_y(),
-            aspect: config.width as f32 / config.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
-        };
+        let camera = camera::Camera::new((0.0, 5.0, 20.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
+        let projection =
+            camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
+        let camera_controller = camera::CameraController::new(10.0, 1.0);
+
         let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera);
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[camera_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        camera_uniform.update_view_proj(&camera, &projection);
+        let camera_buffer =
+            device.create_buffer_init(&egui_wgpu::wgpu::util::BufferInitDescriptor {
+                label: Some("Camera Buffer"),
+                contents: bytemuck::cast_slice(&[camera_uniform]),
+                usage: egui_wgpu::wgpu::BufferUsages::UNIFORM
+                    | egui_wgpu::wgpu::BufferUsages::COPY_DST,
+            });
         let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
+            device.create_bind_group_layout(&egui_wgpu::wgpu::BindGroupLayoutDescriptor {
+                entries: &[egui_wgpu::wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                    visibility: egui_wgpu::wgpu::ShaderStages::VERTEX,
+                    ty: egui_wgpu::wgpu::BindingType::Buffer {
+                        ty: egui_wgpu::wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -507,9 +406,9 @@ impl<'a> State<'a> {
                 }],
                 label: Some("camera_bind_group_layout"),
             });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let camera_bind_group = device.create_bind_group(&egui_wgpu::wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
+            entries: &[egui_wgpu::wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
             }],
@@ -518,80 +417,84 @@ impl<'a> State<'a> {
         trace!("Camera created");
 
         trace!("Creating render pipeline");
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let shader = device.create_shader_module(egui_wgpu::wgpu::include_wgsl!("shader.wgsl"));
         debug!("Shader created");
         let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            device.create_pipeline_layout(&egui_wgpu::wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
                 bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
                 push_constant_ranges: &[],
             });
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc(), InstanceRaw::desc()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: texture::Texture::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+        let render_pipeline =
+            device.create_render_pipeline(&egui_wgpu::wgpu::RenderPipelineDescriptor {
+                label: Some("Render Pipeline"),
+                layout: Some(&render_pipeline_layout),
+                vertex: egui_wgpu::wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[Vertex::desc(), InstanceRaw::desc()],
+                    // compilation_options: egui_wgpu::wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(egui_wgpu::wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(egui_wgpu::wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(egui_wgpu::wgpu::BlendState::REPLACE),
+                        write_mask: egui_wgpu::wgpu::ColorWrites::ALL,
+                    })],
+                    // compilation_options: egui_wgpu::wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: egui_wgpu::wgpu::PrimitiveState {
+                    topology: egui_wgpu::wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: egui_wgpu::wgpu::FrontFace::Ccw,
+                    cull_mode: Some(egui_wgpu::wgpu::Face::Back),
+                    // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                    polygon_mode: egui_wgpu::wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(egui_wgpu::wgpu::DepthStencilState {
+                    format: texture::Texture::DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare: egui_wgpu::wgpu::CompareFunction::Less,
+                    stencil: egui_wgpu::wgpu::StencilState::default(),
+                    bias: egui_wgpu::wgpu::DepthBiasState::default(),
+                }),
+                multisample: egui_wgpu::wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                // cache: None,
+            });
         trace!("Render pipeline created");
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let vertex_buffer =
+            device.create_buffer_init(&egui_wgpu::wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: bytemuck::cast_slice(VERTICES),
+                usage: egui_wgpu::wgpu::BufferUsages::VERTEX,
+            });
         trace!("Vertex buffer created");
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let index_buffer =
+            device.create_buffer_init(&egui_wgpu::wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: bytemuck::cast_slice(INDICES),
+                usage: egui_wgpu::wgpu::BufferUsages::INDEX,
+            });
         let num_indices = INDICES.len() as u32;
         trace!("Index buffer created");
 
-        let camera_controller = CameraController::new(0.1);
+        let egui = gui::EguiRenderer::new(&device, window);
+        trace!("Egui renderer created");
 
         debug!("State created successfully");
         Self {
             size,
-            clear_color: wgpu::Color {
+            clear_color: egui_wgpu::wgpu::Color {
                 r: 0.1,
                 g: 0.2,
                 b: 0.3,
@@ -609,15 +512,17 @@ impl<'a> State<'a> {
             diffuse_bind_group,
             _diffuse_texture: diffuse_texture,
             camera,
+            projection,
             camera_controller,
             camera_uniform,
             camera_buffer,
             camera_bind_group,
-            last_update_inst: std::time::Instant::now(),
             instances,
             instance_buffer,
-            cap_frame_rate: true,
             depth_texture,
+            egui,
+            status: Status::default(),
+            mouse_pressed: false,
         }
     }
 
@@ -625,7 +530,7 @@ impl<'a> State<'a> {
         &self.window
     }
 
-    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+    pub fn resize(&mut self, new_size: egui_winit::winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
             self.config.width = new_size.width;
@@ -633,109 +538,143 @@ impl<'a> State<'a> {
             self.surface.configure(&self.device, &self.config);
             self.depth_texture =
                 texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
+            self.projection.resize(new_size.width, new_size.height);
         }
     }
 
     pub fn input(&mut self, event: &WindowEvent) -> bool {
-        if self.camera_controller.process_events(event) {
-            return true;
-        }
-
         match event {
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
+                        physical_key: PhysicalKey::Code(key),
                         state,
-                        physical_key: PhysicalKey::Code(keycode),
                         ..
                     },
                 ..
+            } => self.camera_controller.process_keyboard(*key, *state),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.camera_controller.process_scroll(delta);
+                true
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state,
+                ..
             } => {
-                let is_pressed = *state == ElementState::Pressed;
-                match keycode {
-                    KeyCode::Space => {
-                        if is_pressed {
-                            self.cap_frame_rate = !self.cap_frame_rate;
-                        }
-                        true
-                    }
-                    _ => false,
-                }
+                self.mouse_pressed = *state == ElementState::Pressed;
+                true
             }
             _ => false,
-        };
-
-        return false;
+        }
     }
 
-    pub fn update(&mut self) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera);
+    pub fn update(&mut self, dt: std::time::Duration) {
+        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.camera_uniform
+            .update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
-
-        // TODO: Unfix the frame value and maybe move that to somewhere else
-        let now = std::time::Instant::now();
-        let delta_time = now - self.last_update_inst;
-        let fps = 1.0 / delta_time.as_secs_f32();
-        self.last_update_inst = now;
-        self.window
-            .set_title(&format!("With the Wind FPS: {:.2}", fps));
-        if self.cap_frame_rate {
-            let sleep_duration = std::time::Duration::from_secs_f32(1.0 / 60.0)
-                .checked_sub(delta_time)
-                .unwrap_or_default();
-            std::thread::sleep(sleep_duration);
-        }
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self) -> Result<(), egui_wgpu::wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
 
         let view = output
             .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+            .create_view(&egui_wgpu::wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
+        let mut encoder =
+            self.device
+                .create_command_encoder(&egui_wgpu::wgpu::CommandEncoderDescriptor {
+                    label: Some("Render Encoder"),
+                });
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
+            let mut render_pass =
+                encoder.begin_render_pass(&egui_wgpu::wgpu::RenderPassDescriptor {
+                    label: Some("Render Pass"),
+                    color_attachments: &[Some(egui_wgpu::wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: egui_wgpu::wgpu::Operations {
+                            load: egui_wgpu::wgpu::LoadOp::Clear(self.clear_color),
+                            store: egui_wgpu::wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(
+                        egui_wgpu::wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.depth_texture.view,
+                            depth_ops: Some(egui_wgpu::wgpu::Operations {
+                                load: egui_wgpu::wgpu::LoadOp::Clear(1.0),
+                                store: egui_wgpu::wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        },
+                    ),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.set_index_buffer(
+                self.index_buffer.slice(..),
+                egui_wgpu::wgpu::IndexFormat::Uint16,
+            );
             render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
         }
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.size.width, self.size.height],
+            pixels_per_point: 1.0,
+        };
+
+        self.egui.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            self.window,
+            &view,
+            &screen_descriptor,
+            |ui| {
+                egui::Window::new("Debug").show(&ui, |ui| {
+                    ui.label(format!("FPS: {:.2}", self.status.fps));
+                    ui.label(format!("Avg FPS: {:.2}", self.status.fps_avg));
+                    ui.label(format!(
+                        "Delta Time: {} µs ({} ms)",
+                        self.status.delta,
+                        self.status.delta / 1000
+                    ));
+                    ui.separator();
+                    ui.label("Window");
+                    ui.label(format!("Width: {}", self.size.width));
+                    ui.label(format!("Height: {}", self.size.height));
+                    ui.separator();
+                    ui.label("Camera");
+                    ui.label(format!("Camera Position: {:?}", self.camera.position));
+                    ui.label(format!("Camera Yaw: {:?}", self.camera.yaw));
+                    ui.label(format!("Camera Pitch: {:?}", self.camera.pitch));
+                    ui.separator();
+                    ui.label("Projection");
+                    ui.label(format!("Aspect: {}", self.projection.aspect));
+                    ui.label(format!("Fovy: {:?}", self.projection.fovy));
+                    ui.label(format!("Znear: {}", self.projection.znear));
+                    ui.label(format!("Zfar: {}", self.projection.zfar));
+                    ui.separator();
+                    ui.label("Instances");
+                    ui.label(format!("Instances per row: {}", NUM_INSTANCES_PER_ROW));
+                    ui.label(format!("Amount of Instances: {}", self.instances.len()));
+                    ui.label(format!("Amount triangles: {}", self.instances.len() * 2));
+                });
+            },
+        );
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
